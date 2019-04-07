@@ -614,7 +614,45 @@ struct fi_ibv_ep {
 		struct ibv_sge		sge;
 	} *wrs;
 	size_t				rx_size;
+#ifdef ENABLE_DEBUG
+	int				conn_ts_idx;
+#endif
 };
+
+#define VERBS_MAX_CONN_TS		(128 * 1024)
+extern ofi_atomic32_t g_next_conn_idx;
+extern uint64_t g_conn_req_ts[VERBS_MAX_CONN_TS];
+extern uint64_t g_conn_done_ts[VERBS_MAX_CONN_TS];
+extern int g_conn_rejected[VERBS_MAX_CONN_TS];
+
+static inline void fi_ibv_set_conn_idx(struct fi_ibv_ep *ep)
+{
+	ep->conn_ts_idx = ofi_atomic_inc32(&g_next_conn_idx);
+	if (ep->conn_ts_idx >= VERBS_MAX_CONN_TS)
+		ep->conn_ts_idx = -1;
+}
+
+static inline void fi_ibv_update_conn_req_ts(struct fi_ibv_ep *ep)
+{
+	fi_ibv_set_conn_idx(ep);
+	if (ep->conn_ts_idx < 0)
+		return;
+	g_conn_req_ts[ep->conn_ts_idx] = fi_gettime_us();
+}
+
+static inline void fi_ibv_update_conn_done_ts(struct fi_ibv_ep *ep)
+{
+	if (ep->conn_ts_idx < 0)
+		return;
+	g_conn_done_ts[ep->conn_ts_idx] = fi_gettime_us();
+}
+
+static inline void fi_ibv_update_conn_rejected_ts(struct fi_ibv_ep *ep)
+{
+	if (ep->conn_ts_idx < 0)
+		return;
+	g_conn_rejected[ep->conn_ts_idx] = 1;
+}
 
 struct fi_ibv_xrc_ep {
 	/* Must be first */

@@ -177,7 +177,9 @@ fi_ibv_msg_ep_connect(struct fid_ep *ep, const void *addr,
 			   inet_ntoa(((struct sockaddr_in *)dst_addr)->sin_addr),
 			   ntohs(((struct sockaddr_in *)dst_addr)->sin_port));
 	}
-
+#ifdef ENABLE_DEBUG
+	fi_ibv_update_conn_req_ts(_ep);
+#endif
 	return rdma_connect(_ep->id, &conn_param) ? -errno : 0;
 }
 
@@ -363,6 +365,9 @@ fi_ibv_msg_xrc_ep_connect(struct fid_ep *ep, const void *addr,
 		return ret;
 
 	dst_addr = rdma_get_peer_addr(_ep->id);
+#ifdef ENABLE_DEBUG
+	fi_ibv_update_conn_req_ts(_ep);
+#endif
 	ret = fi_ibv_connect_xrc(xrc_ep, dst_addr, 0, adjusted_param, paramlen);
 	free(adjusted_param);
 	return ret;

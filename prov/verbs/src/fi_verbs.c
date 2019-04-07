@@ -100,6 +100,12 @@ struct util_prov fi_ibv_util_prov = {
 	.flags = 0,
 };
 
+ofi_atomic32_t g_next_conn_idx;
+uint64_t g_conn_req_ts[VERBS_MAX_CONN_TS];
+uint64_t g_conn_done_ts[VERBS_MAX_CONN_TS];
+uint64_t g_deltas_ts[VERBS_MAX_CONN_TS];
+int g_conn_rejected[VERBS_MAX_CONN_TS];
+
 int fi_ibv_sockaddr_len(struct sockaddr *addr)
 {
 	if (addr->sa_family == AF_IB)
@@ -681,8 +687,71 @@ static int fi_ibv_read_params(void)
 	return FI_SUCCESS;
 }
 
+int delta_compare(const void *e1, const void *e2)
+{
+	if (*((uint64_t *) e1) < *((uint64_t *) e2))
+		return -1;
+	if (*((uint64_t *) e1) > *((uint64_t *) e2))
+		return 1;
+	return 0;
+}
+
+uint64_t fi_ibv_conn_median(uint64_t *deltas, int num)
+{
+	if (num <= 0)
+		return 0;
+
+	qsort(deltas, num, sizeof(uint64_t), delta_compare);
+	if (num & 1)
+		return deltas[num >> 1];
+	return ((double)(deltas[num >> 1] + deltas[(num >> 1) -1]) / 2.0);
+}
+
+static void fi_ibv_conn_stats(void)
+{
+	uint64_t req_min = UINT64_MAX;
+	uint64_t req_max = 0;
+	double sum = 0.0;
+	double avg = 0.0;
+	int max_conn_idx = ofi_atomic_get32(&g_next_conn_idx);
+	int rejects = 0;
+	int accepted = 0;
+	int i;
+	pid_t pid = getpid();
+
+	for (i = 0; i <= max_conn_idx; i++) {
+		if (g_conn_req_ts[i]) {
+			if (!g_conn_rejected[i] && g_conn_done_ts[i]) {
+				g_deltas_ts[accepted] =
+					g_conn_done_ts[i] - g_conn_req_ts[i];
+				req_min = MIN(req_min, g_deltas_ts[accepted]);
+				req_max = MAX(req_max, g_deltas_ts[accepted]);
+				sum += (double) g_deltas_ts[accepted];
+				accepted++;
+			} else {
+				rejects++;
+				continue;
+			}
+		}
+	}
+	if (accepted)
+		avg = sum / (double) accepted;
+	else
+		req_min = (double) 0;
+
+	printf("PID %08d ACCEPT: %d\n", pid, accepted);
+	printf("PID %08d TS MIN: %8.2lf\n", pid, (double) req_min);
+	printf("PID %08d TS MAX: %8.2lf\n", pid, (double) req_max);
+	printf("PID %08d TS AVG: %8.2lf\n", pid, avg);
+	printf("PID %08d MEDIAN: %8.2lf\n", pid, accepted ?
+	       (double) fi_ibv_conn_median(g_deltas_ts, accepted) : 0.0	);
+}
+
 static void fi_ibv_fini(void)
 {
+
+	fi_ibv_conn_stats();
+
 	if (fi_ibv_mem_notifier)
 		fi_ibv_mem_notifier_free();
 	fi_freeinfo((void *)fi_ibv_util_prov.info);
@@ -693,5 +762,7 @@ VERBS_INI
 {
 	if (fi_ibv_read_params()|| fi_ibv_init_info(&fi_ibv_util_prov.info))
 		return NULL;
+
+	ofi_atomic_initialize32(&g_next_conn_idx, -1);
 	return &fi_ibv_prov;
 }

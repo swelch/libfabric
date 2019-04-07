@@ -452,6 +452,9 @@ fi_ibv_eq_xrc_connected_event(struct fi_ibv_eq *eq,
 	if (ep->conn_state == FI_IBV_XRC_ORIG_CONNECTING)
 		return fi_ibv_eq_xrc_conn_event(ep, cma_event, entry);
 
+#ifdef ENABLE_DEBUG
+	fi_ibv_update_conn_done_ts(&ep->base_ep);
+#endif
 	ret = fi_ibv_eq_xrc_recip_conn_event(eq, ep, cma_event, entry, len);
 
 	/* Bidirectional connection setup is complete, disconnect RDMA CM
@@ -517,6 +520,9 @@ fi_ibv_eq_cm_process_event(struct fi_ibv_eq *eq,
 			return fi_ibv_eq_xrc_connected_event(eq, cma_event,
 							     entry, len, acked);
 		entry->info = NULL;
+#ifdef ENABLE_DEBUG
+		fi_ibv_update_conn_done_ts(ep);
+#endif
 		break;
 	case RDMA_CM_EVENT_DISCONNECTED:
 		ep = container_of(fid, struct fi_ibv_ep, util_ep.ep_fid);
@@ -533,6 +539,9 @@ fi_ibv_eq_cm_process_event(struct fi_ibv_eq *eq,
 		goto err;
 	case RDMA_CM_EVENT_REJECTED:
 		ep = container_of(fid, struct fi_ibv_ep, util_ep.ep_fid);
+#ifdef ENABLE_DEBUG
+		fi_ibv_update_conn_rejected_ts(ep);
+#endif
 		if (fi_ibv_is_xrc(ep->info)) {
 			ret = fi_ibv_eq_xrc_rej_event(eq, cma_event);
 			if (ret == -FI_EAGAIN)
