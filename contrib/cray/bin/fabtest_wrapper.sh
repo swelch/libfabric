@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export FABTESTS_PATH=/scratch/jenkins/builds/fabtests/stable
+export FABTESTS_PATH=${PWD}/installs/fabtests
 export PATH=${FABTESTS_PATH}/bin:$PATH
 
 if [[ -z ${FABTEST_PROVIDER} ]] ; then
