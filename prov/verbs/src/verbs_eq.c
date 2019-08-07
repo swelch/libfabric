@@ -521,8 +521,7 @@ fi_ibv_eq_xrc_cm_err_event(struct fi_ibv_eq *eq,
 static inline int
 fi_ibv_eq_xrc_connected_event(struct fi_ibv_eq *eq,
 			      struct rdma_cm_event *cma_event,
-			      struct fi_eq_cm_entry *entry, size_t len,
-			      int *acked)
+			      struct fi_eq_cm_entry *entry, size_t len)
 {
 	struct fi_ibv_xrc_ep *ep;
 	fid_t fid = cma_event->id->context;
@@ -541,8 +540,6 @@ fi_ibv_eq_xrc_connected_event(struct fi_ibv_eq *eq,
 	/* Bidirectional connection setup is complete, disconnect RDMA CM
 	 * ID(s) and release shared QP reservations/hardware resources
 	 * that were needed for shared connection setup only. */
-	*acked = 1;
-	rdma_ack_cm_event(cma_event);
 	fi_ibv_free_xrc_conn_setup(ep, 1);
 
 	return ret;
@@ -649,7 +646,7 @@ fi_ibv_eq_cm_process_event(struct fi_ibv_eq *eq,
 		if (fi_ibv_is_xrc(ep->info)) {
 			fastlock_acquire(&eq->lock);
 			ret = fi_ibv_eq_xrc_connected_event(eq, cma_event,
-							    entry, len, acked);
+							    entry, len);
 			fastlock_release(&eq->lock);
 			return ret;
 		}
