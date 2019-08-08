@@ -495,11 +495,26 @@ static int fi_ibv_domain_xrc_validate_hw(struct fi_ibv_domain *domain)
 	return FI_SUCCESS;
 }
 
+FI_VERBS_XRC_ONLY
+static void fi_ibv_domain_xrc_cleanup_xrcd_file(struct fi_ibv_domain *domain)
+{
+	int fd;
+
+	/* This linux specific solution attempts to cleanup the XRC domain
+	 * filename if the file is not in use by another process. */
+	fd = open(fi_ibv_gl_data.msg.xrcd_filename, O_EXCL, 0);
+	if (fd >= 0) {
+		unlink(fi_ibv_gl_data.msg.xrcd_filename);
+		close(fd);
+	}
+}
+
 int fi_ibv_domain_xrc_init(struct fi_ibv_domain *domain)
 {
 #if VERBS_HAVE_XRC
 	struct ibv_xrcd_init_attr attr;
 	int ret;
+	int retry = 1000;
 
 	ret = fi_ibv_domain_xrc_validate_hw(domain);
 	if (ret)
@@ -507,13 +522,18 @@ int fi_ibv_domain_xrc_init(struct fi_ibv_domain *domain)
 
 	domain->xrc.xrcd_fd = -1;
 	if (fi_ibv_gl_data.msg.xrcd_filename) {
+		/* We retry the open to handle the race where another process
+		 * is unlinking the file */
+open_file:
 		domain->xrc.xrcd_fd = open(fi_ibv_gl_data.msg.xrcd_filename,
 				       O_CREAT, S_IWUSR | S_IRUSR);
-		if (domain->xrc.xrcd_fd < 0) {
+		if (domain->xrc.xrcd_fd < 0 && errno != FI_EACCES) {
 			VERBS_WARN(FI_LOG_DOMAIN,
 				   "XRCD file open failed %d\n", errno);
 			return -errno;
 		}
+		if (domain->xrc.xrcd_fd < 0 && retry--)
+			goto open_file;
 	}
 
 	attr.comp_mask = IBV_XRCD_INIT_ATTR_FD | IBV_XRCD_INIT_ATTR_OFLAGS;
@@ -544,6 +564,7 @@ xrcd_err:
 	if (domain->xrc.xrcd_fd >= 0) {
 		close(domain->xrc.xrcd_fd);
 		domain->xrc.xrcd_fd = -1;
+		fi_ibv_domain_xrc_cleanup_xrcd_file(domain);
 	}
 	return ret;
 #else /* VERBS_HAVE_XRC */
@@ -572,6 +593,7 @@ int fi_ibv_domain_xrc_cleanup(struct fi_ibv_domain *domain)
 	if (domain->xrc.xrcd_fd >= 0) {
 		close(domain->xrc.xrcd_fd);
 		domain->xrc.xrcd_fd = -1;
+		fi_ibv_domain_xrc_cleanup_xrcd_file(domain);
 	}
 
 	ofi_rbmap_destroy(domain->xrc.ini_conn_rbmap);
