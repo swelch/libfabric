@@ -328,6 +328,9 @@ struct fi_ibv_domain {
 		int			xrcd_fd;
 		struct ibv_xrcd		*xrcd;
 
+		/* CQ used when allocating XRC temporary reserved QP numbers */
+		struct ibv_cq		*rsvd_cq;
+
 		/* The domain maintains a RBTree for mapping an endpoint
 		 * destination addresses to physical XRC INI QP connected
 		 * to that host. The map is protected using the EQ lock

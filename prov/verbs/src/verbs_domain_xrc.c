@@ -51,8 +51,6 @@ static int fi_ibv_process_ini_conn(struct fi_ibv_xrc_ep *ep,int reciprocal,
 int fi_ibv_reserve_qpn(struct fi_ibv_xrc_ep *ep, struct ibv_qp **qp)
 {
 	struct fi_ibv_domain *domain = fi_ibv_ep_to_domain(&ep->base_ep);
-	struct fi_ibv_cq *cq = container_of(ep->base_ep.util_ep.tx_cq,
-					    struct fi_ibv_cq, util_cq);
 	struct ibv_qp_init_attr attr = { 0 };
 	int ret;
 
@@ -61,10 +59,9 @@ int fi_ibv_reserve_qpn(struct fi_ibv_xrc_ep *ep, struct ibv_qp **qp)
 	attr.cap.max_send_sge = 1;
 	attr.cap.max_recv_wr = 0;
 	attr.cap.max_recv_sge = 0;
-	attr.cap.max_inline_data = 0;
-	attr.send_cq = cq->cq;
-	attr.recv_cq = cq->cq;
-	attr.qp_type = IBV_QPT_RC;
+	attr.send_cq = domain->xrc.rsvd_cq;
+	attr.recv_cq = domain->xrc.rsvd_cq;
+	attr.qp_type = IBV_QPT_UD;
 
 	*qp = ibv_create_qp(domain->pd, &attr);
 	if (OFI_UNLIKELY(!*qp)) {
@@ -517,14 +514,23 @@ int fi_ibv_domain_xrc_init(struct fi_ibv_domain *domain)
 	if (ret)
 		return ret;
 
+	domain->xrc.rsvd_cq = ibv_create_cq(domain->verbs, 1, NULL, NULL, 0);
+	if (!domain->xrc.rsvd_cq) {
+		ret = -errno;
+		VERBS_WARN(FI_LOG_DOMAIN,
+			   "Create CQ for XRC reserved QP error %d\n", ret);
+		return ret;
+	}
+
 	domain->xrc.xrcd_fd = -1;
 	if (fi_ibv_gl_data.msg.xrcd_filename) {
 		domain->xrc.xrcd_fd = open(fi_ibv_gl_data.msg.xrcd_filename,
 				       O_CREAT, S_IWUSR | S_IRUSR);
 		if (domain->xrc.xrcd_fd < 0) {
+			ret = -errno;
 			VERBS_WARN(FI_LOG_DOMAIN,
 				   "XRCD file open failed %d\n", errno);
-			return -errno;
+			goto open_err;
 		}
 	}
 
@@ -555,6 +561,9 @@ xrcd_err:
 		close(domain->xrc.xrcd_fd);
 		domain->xrc.xrcd_fd = -1;
 	}
+open_err:
+	ibv_destroy_cq(domain->xrc.rsvd_cq);
+
 	return ret;
 #else /* VERBS_HAVE_XRC */
 	return -FI_ENOSYS;
@@ -583,6 +592,9 @@ int fi_ibv_domain_xrc_cleanup(struct fi_ibv_domain *domain)
 		close(domain->xrc.xrcd_fd);
 		domain->xrc.xrcd_fd = -1;
 	}
+
+	ibv_destroy_cq(domain->xrc.rsvd_cq);
+	domain->xrc.rsvd_cq = NULL;
 
 	ofi_rbmap_destroy(domain->xrc.ini_conn_rbmap);
 #endif /* VERBS_HAVE_XRC */
