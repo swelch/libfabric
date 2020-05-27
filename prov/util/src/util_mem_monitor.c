@@ -124,6 +124,7 @@ void ofi_monitors_init(void)
 			default_monitor = uffd_monitor;
 #else
 			FI_WARN(&core_prov, FI_LOG_MR, "userfaultfd monitor not available\n");
+			default_monitor = NULL;
 #endif
 		} else if (!strcmp(cache_params.monitor, "memhooks")) {
 			default_monitor = memhooks_monitor;
