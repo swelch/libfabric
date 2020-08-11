@@ -57,7 +57,6 @@
 #ifndef _RXM_H_
 #define _RXM_H_
 
-
 #define RXM_CM_DATA_VERSION	1
 #define RXM_OP_VERSION		3
 #define RXM_CTRL_VERSION	4
@@ -420,6 +419,7 @@ enum rxm_buf_pool_type {
 	RXM_BUF_POOL_TX_SAR,
 	RXM_BUF_POOL_TX_END	= RXM_BUF_POOL_TX_SAR,
 	RXM_BUF_POOL_RMA,
+	RXM_BUF_POOL_RECV_ENTRY,
 	RXM_BUF_POOL_MAX,
 };
 
@@ -605,7 +605,6 @@ struct rxm_recv_entry {
 		struct rxm_tx_base_buf *tx_buf;
 	} rndv;
 };
-DECLARE_FREESTACK(struct rxm_recv_entry, rxm_recv_fs);
 
 enum rxm_recv_queue_type {
 	RXM_RECV_QUEUE_UNSPEC,
@@ -616,7 +615,6 @@ enum rxm_recv_queue_type {
 struct rxm_recv_queue {
 	struct rxm_ep *rxm_ep;
 	enum rxm_recv_queue_type type;
-	struct rxm_recv_fs *fs;
 	struct dlist_entry recv_list;
 	struct dlist_entry unexp_msg_list;
 	dlist_func_t *match_recv;
@@ -888,7 +886,8 @@ rxm_tx_buf_alloc(struct rxm_ep *rxm_ep, enum rxm_buf_pool_type type)
 	       (type == RXM_BUF_POOL_TX_RNDV) ||
 	       (type == RXM_BUF_POOL_TX_ATOMIC) ||
 	       (type == RXM_BUF_POOL_TX_CREDIT) ||
-	       (type == RXM_BUF_POOL_TX_SAR));
+	       (type == RXM_BUF_POOL_TX_SAR) ||
+	       (type == RXM_BUF_POOL_RECV_ENTRY));
 	return ofi_buf_alloc(rxm_ep->buf_pools[type].pool);
 }
 
@@ -922,11 +921,37 @@ rxm_rx_buf_free(struct rxm_rx_buf *rx_buf)
 	}
 }
 
+static inline struct rxm_recv_entry *
+rxm_recv_entry_alloc(struct rxm_recv_queue *recv_queue,struct rxm_ep *rxm_ep)
+{
+	struct rxm_recv_entry *entry;
+	size_t entry_cnt =
+		    rxm_ep->buf_pools[RXM_BUF_POOL_RECV_ENTRY].pool->entry_cnt;
+
+	entry = ofi_buf_alloc(rxm_ep->buf_pools[RXM_BUF_POOL_RECV_ENTRY].pool);
+	if (!entry)
+		return entry;
+
+	entry->recv_queue = recv_queue;
+	if (recv_queue->type == RXM_RECV_QUEUE_MSG)
+		entry->comp_flags = FI_RECV | FI_MSG;
+	else
+		entry->comp_flags = FI_RECV | FI_TAGGED;
+
+	if (entry_cnt && (entry_cnt !=
+	    rxm_ep->buf_pools[RXM_BUF_POOL_RECV_ENTRY].pool->entry_cnt)) {
+		FI_WARN(&rxm_prov, FI_LOG_EP_DATA,
+			"RX queue enlarged to handle posted receives\n");
+	}
+
+	return entry;
+}
+
 static inline void
-rxm_recv_entry_release(struct rxm_recv_queue *queue, struct rxm_recv_entry *entry)
+rxm_recv_entry_free(struct rxm_recv_entry *entry)
 {
 	entry->total_len = 0;
-	freestack_push(queue->fs, entry);
+	ofi_buf_free(entry);
 }
 
 static inline int rxm_cq_write_recv_comp(struct rxm_rx_buf *rx_buf,

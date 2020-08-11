@@ -113,6 +113,7 @@ static int rxm_buf_reg(struct ofi_bufpool_region *region)
 	int ret;
 
 	if ((pool->type == RXM_BUF_POOL_TX_INJECT) ||
+	    (pool->type == RXM_BUF_POOL_RECV_ENTRY) ||
 	    !pool->rxm_ep->msg_mr_local)
 		return 0;
 
@@ -138,10 +139,12 @@ static void rxm_buf_init(struct ofi_bufpool_region *region, void *buf)
 	struct rxm_tx_rndv_buf *tx_rndv_buf;
 	struct rxm_tx_atomic_buf *tx_atomic_buf;
 	struct rxm_rma_buf *rma_buf;
+	struct rxm_recv_entry *recv_entry;
 	void *mr_desc;
 	uint8_t type;
 
 	if ((pool->type != RXM_BUF_POOL_TX_INJECT) &&
+	    (pool->type != RXM_BUF_POOL_RECV_ENTRY) &&
 	    pool->rxm_ep->msg_mr_local) {
 		mr_desc = fi_mr_desc((struct fid_mr *) region->context);
 	} else {
@@ -219,6 +222,15 @@ static void rxm_buf_init(struct ofi_bufpool_region *region, void *buf)
 		pkt = &rma_buf->pkt;
 		type = rxm_ctrl_eager;
 		break;
+	case RXM_BUF_POOL_RECV_ENTRY:
+		pkt = NULL;
+		recv_entry = buf;
+		recv_entry->sar.msg_id = RXM_SAR_RX_INIT;
+		recv_entry->sar.total_recv_len = 0;
+		/* Set it to NULL to differentiate between regular ACKSs and
+		 * those sent with FI_INJECT */
+		recv_entry->rndv.tx_buf = NULL;
+		break;
 	default:
 		assert(0);
 		pkt = NULL;
@@ -237,7 +249,8 @@ static void rxm_buf_close(struct ofi_bufpool_region *region)
 	struct rxm_buf_pool *pool = region->pool->attr.context;
 	struct rxm_ep *rxm_ep = pool->rxm_ep;
 
-	if ((rxm_ep->msg_mr_local) && (pool->type != RXM_BUF_POOL_TX_INJECT)) {
+	if ((rxm_ep->msg_mr_local) && (pool->type != RXM_BUF_POOL_TX_INJECT) &&
+	    (pool->type != RXM_BUF_POOL_RECV_ENTRY)) {
 		/* We would get a (fid_mr *) in context but
 		 * it is safe to cast it into (fid *) */
 		fi_close(region->context);
@@ -280,38 +293,14 @@ static int rxm_buf_pool_create(struct rxm_ep *rxm_ep, size_t size,
 	return ret;
 }
 
-static void rxm_recv_entry_init(struct rxm_recv_entry *entry, void *arg)
-{
-	struct rxm_recv_queue *recv_queue = arg;
-
-	assert(recv_queue->type != RXM_RECV_QUEUE_UNSPEC);
-
-	entry->recv_queue = recv_queue;
-	entry->sar.msg_id = RXM_SAR_RX_INIT;
-	entry->sar.total_recv_len = 0;
-	/* set it to NULL to differentiate between regular ACKs and those
-	 * sent with FI_INJECT */
-	entry->rndv.tx_buf = NULL;
-	entry->comp_flags = FI_RECV;
-
-	if (recv_queue->type == RXM_RECV_QUEUE_MSG)
-		entry->comp_flags |= FI_MSG;
-	else
-		entry->comp_flags |= FI_TAGGED;
-}
-
 static int rxm_recv_queue_init(struct rxm_ep *rxm_ep,  struct rxm_recv_queue *recv_queue,
 			       size_t size, enum rxm_recv_queue_type type)
 {
 	recv_queue->rxm_ep = rxm_ep;
 	recv_queue->type = type;
-	recv_queue->fs = rxm_recv_fs_create(size, rxm_recv_entry_init,
-					    recv_queue);
-	if (!recv_queue->fs)
-		return -FI_ENOMEM;
-
 	dlist_init(&recv_queue->recv_list);
 	dlist_init(&recv_queue->unexp_msg_list);
+
 	if (type == RXM_RECV_QUEUE_MSG) {
 		if (rxm_ep->rxm_info->caps & FI_DIRECTED_RECV) {
 			recv_queue->match_recv = rxm_match_recv_entry;
@@ -335,10 +324,6 @@ static int rxm_recv_queue_init(struct rxm_ep *rxm_ep,  struct rxm_recv_queue *re
 
 static void rxm_recv_queue_close(struct rxm_recv_queue *recv_queue)
 {
-	/* It indicates that the recv_queue were allocated */
-	if (recv_queue->fs) {
-		rxm_recv_fs_free(recv_queue->fs);
-	}
 	// TODO cleanup recv_list and unexp msg list
 }
 
@@ -355,6 +340,12 @@ static int rxm_ep_txrx_pool_create(struct rxm_ep *rxm_ep)
 		[RXM_BUF_POOL_TX_SAR] = rxm_ep->msg_info->tx_attr->size,
 		[RXM_BUF_POOL_TX_CREDIT] = rxm_ep->msg_info->tx_attr->size,
 		[RXM_BUF_POOL_RMA] = rxm_ep->msg_info->tx_attr->size,
+#if 0
+		/* Just used to verify/debug changes, do not include PR */
+		[RXM_BUF_POOL_RECV_ENTRY] = 4,
+#else
+		[RXM_BUF_POOL_RECV_ENTRY] = rxm_ep->rxm_info->rx_attr->size,
+#endif
 	};
 	size_t entry_sizes[] = {
 		[RXM_BUF_POOL_RX] = rxm_eager_limit +
@@ -374,6 +365,7 @@ static int rxm_ep_txrx_pool_create(struct rxm_ep *rxm_ep)
 		[RXM_BUF_POOL_TX_CREDIT] = sizeof(struct rxm_tx_base_buf),
 		[RXM_BUF_POOL_RMA] = rxm_eager_limit +
 				     sizeof(struct rxm_rma_buf),
+		[RXM_BUF_POOL_RECV_ENTRY] = sizeof(struct rxm_recv_entry),
 	};
 
 	dlist_init(&rxm_ep->repost_ready_list);
@@ -390,8 +382,17 @@ static int rxm_ep_txrx_pool_create(struct rxm_ep *rxm_ep)
 
 		ret = rxm_buf_pool_create(rxm_ep, entry_sizes[i],
 					  (i == RXM_BUF_POOL_RX ||
-					   i == RXM_BUF_POOL_TX_ATOMIC) ? 0 :
+					   i == RXM_BUF_POOL_TX_ATOMIC ||
+					   i == RXM_BUF_POOL_RECV_ENTRY) ? 0 :
+#if 0
+		/* Just used to verify/debug changes, do not include PR */
+					  (i == RXM_BUF_POOL_RECV_ENTRY) ? 4 :
 					  rxm_ep->rxm_info->tx_attr->size,
+#else
+					  (i == RXM_BUF_POOL_RECV_ENTRY) ?
+					  queue_sizes[RXM_BUF_POOL_RECV_ENTRY] :
+					  rxm_ep->rxm_info->tx_attr->size,
+#endif
 					  queue_sizes[i],
 					  &rxm_ep->buf_pools[i], i);
 		if (ret)
@@ -526,7 +527,7 @@ static int rxm_ep_cancel_recv(struct rxm_ep *rxm_ep,
 		err_entry.tag = recv_entry->tag;
 		err_entry.err = FI_ECANCELED;
 		err_entry.prov_errno = -FI_ECANCELED;
-		rxm_recv_entry_release(recv_queue, recv_entry);
+		rxm_recv_entry_free(recv_entry);
 		ret = ofi_cq_write_error(rxm_ep->util_ep.rx_cq, &err_entry);
 	} else {
 		ret = 0;
@@ -783,10 +784,10 @@ rxm_recv_entry_get(struct rxm_ep *rxm_ep, const struct iovec *iov,
 	struct rxm_recv_entry *recv_entry;
 	size_t i;
 
-	if (freestack_isempty(recv_queue->fs))
+	recv_entry = rxm_recv_entry_alloc(recv_queue, rxm_ep);
+	if (!recv_entry)
 		return NULL;
 
-	recv_entry = freestack_pop(recv_queue->fs);
 	assert(!recv_entry->rndv.tx_buf);
 
 	recv_entry->rxm_iov.count = (uint8_t) count;
