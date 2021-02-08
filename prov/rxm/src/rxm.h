@@ -165,14 +165,27 @@ extern char *rxm_cm_state_str[];
 	do {								\
 		FI_DBG(&rxm_prov, FI_LOG_EP_CTRL, "[CM] handle: "	\
 		       "%p %s -> %s\n",	handle,				\
-		       rxm_cm_state_str[handle->state],			\
+		       rxm_cm_state_str[(handle)->state],		\
 		       rxm_cm_state_str[new_state]);			\
-		handle->state = new_state;				\
+		(handle)->state = new_state;				\
+	} while (0)
+
+/* Maintain separate RX state for simplex connections */
+#define RXM_CM_UPDATE_RX_STATE(handle, new_state)			\
+	do {								\
+		FI_DBG(&rxm_prov, FI_LOG_EP_CTRL, "[CM] handle: "	\
+		       "%p RX %s -> %s\n", handle,			\
+		       rxm_cm_state_str[(handle)->rx_state],		\
+		       rxm_cm_state_str[new_state]);			\
+		(handle)->rx_state = new_state;				\
 	} while (0)
 
 struct rxm_cmap_handle {
 	struct rxm_cmap *cmap;
 	enum rxm_cmap_state state;
+	/* When using simplex protocol EP, maintain RX state separate
+	 * from TX state */
+	enum rxm_cmap_state rx_state;
 	/* Unique identifier for a connection. Can be exchanged with a peer
 	 * during connection setup and can later be used in a message header
 	 * to identify the source of the message (Used for FI_SOURCE, RNDV
@@ -190,7 +203,8 @@ struct rxm_cmap_peer {
 };
 
 struct rxm_cmap_attr {
-	void 				*name;
+	void			*name;
+	bool			simplex;
 };
 
 struct rxm_cmap {
@@ -246,7 +260,6 @@ union rxm_cm_data {
 };
 
 int rxm_cmap_alloc_handle(struct rxm_cmap *cmap, fi_addr_t fi_addr,
-			  enum rxm_cmap_state state,
 			  struct rxm_cmap_handle **handle);
 struct rxm_cmap_handle *rxm_cmap_key2handle(struct rxm_cmap *cmap, uint64_t key);
 int rxm_cmap_update(struct rxm_cmap *cmap, const void *addr, fi_addr_t fi_addr);
@@ -766,6 +779,8 @@ struct rxm_conn {
 	struct rxm_cmap_handle handle;
 
 	struct fid_ep *msg_ep;
+	/* Simplex transports require a connection in both directions */
+	struct fid_ep *rx_msg_ep;
 
 	/* This is used only in non-FI_THREAD_SAFE case */
 	struct rxm_pkt *inject_pkt;
@@ -779,6 +794,7 @@ struct rxm_conn {
 	struct dlist_entry sar_deferred_rx_msg_list;
 
 	uint32_t rndv_tx_credits;
+	bool simplex;
 };
 
 extern struct fi_provider rxm_prov;
@@ -953,6 +969,19 @@ rxm_cq_write_src(struct util_cq *cq, void *context, uint64_t flags, size_t len,
 
 ssize_t rxm_get_conn(struct rxm_ep *rxm_ep, fi_addr_t addr,
 		     struct rxm_conn **rxm_conn);
+
+/* Software protocols can require duplex connectivity between
+ * peer endpoints (e.g. rendezvous protocol, simulated atomics).
+ * Verify duplex connectivity back to the original source has
+ * been established, initiating a connect if required. */
+static inline int
+rxm_check_duplex_conn(struct rxm_cmap_handle *handle)
+{
+	if (!handle->cmap->attr.simplex || handle->state == RXM_CMAP_CONNECTED)
+		return FI_SUCCESS;
+
+	return rxm_cmap_connect(handle->cmap->ep, handle->fi_addr, handle);
+}
 
 static inline void
 rxm_ep_format_tx_buf_pkt(struct rxm_conn *rxm_conn, size_t len, uint8_t op,

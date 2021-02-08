@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2013-2020 Intel Corporation. All rights reserved.
  * Copyright (c) 2018 Cray Inc. All rights reserved.
- * Copyright (c) 2018 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2018-2021 System Fabric Works, Inc. All rights reserved.
  * Copyright (c) 2019 Amazon.com, Inc. or its affiliates. All rights reserved.
  * (C) Copyright 2020 Hewlett Packard Enterprise Development LP
  *
@@ -459,7 +459,7 @@ static void rxm_handle_seg_data(struct rxm_rx_buf *rx_buf)
 	}
 }
 
-static ssize_t rxm_rndv_xfer(struct rxm_ep *rxm_ep, struct fid_ep *msg_ep,
+static ssize_t rxm_rndv_xfer(struct rxm_ep *rxm_ep, struct rxm_conn *conn,
 			     struct rxm_rndv_hdr *remote_hdr, struct iovec *local_iov,
 			     void **local_desc, size_t local_count, size_t total_len,
 			     void *context)
@@ -468,6 +468,13 @@ static ssize_t rxm_rndv_xfer(struct rxm_ep *rxm_ep, struct fid_ep *msg_ep,
 	struct iovec iov[RXM_IOV_LIMIT];
 	void *desc[RXM_IOV_LIMIT];
 	ssize_t ret = FI_SUCCESS;
+	ssize_t conn_sts = FI_SUCCESS;;
+
+	if (rxm_ep->rndv_ops == &rxm_rndv_ops_read) {
+		conn_sts = rxm_check_duplex_conn(&conn->handle);
+		if (conn_sts && conn_sts != -FI_EAGAIN)
+			return conn_sts;
+	}
 
 	for (i = 0; i < remote_hdr->count && total_len > 0; i++) {
 		copy_len = MIN(remote_hdr->iov[i].len, total_len);
@@ -480,10 +487,15 @@ static ssize_t rxm_rndv_xfer(struct rxm_ep *rxm_ep, struct fid_ep *msg_ep,
 		if (ret)
 			return ret;
 		total_len -= copy_len;
-		ret = rxm_ep->rndv_ops->xfer(msg_ep, iov, desc, count, 0,
-			       remote_hdr->iov[i].addr, remote_hdr->iov[i].key,
-			       context);
 
+		if (conn_sts)
+			ret = conn_sts;
+		else
+			ret = rxm_ep->rndv_ops->xfer(conn->msg_ep, iov, desc,
+						     count, 0,
+						     remote_hdr->iov[i].addr,
+						     remote_hdr->iov[i].key,
+						     context);
 		if (ret) {
 			if (ret == -FI_EAGAIN) {
 				struct rxm_deferred_tx_entry *def_tx_entry;
@@ -511,8 +523,7 @@ ssize_t rxm_rndv_read(struct rxm_rx_buf *rx_buf)
 		MIN(rx_buf->recv_entry->total_len, rx_buf->pkt.hdr.size);
 
 	RXM_UPDATE_STATE(FI_LOG_CQ, rx_buf, RXM_RNDV_READ);
-
-	ret = rxm_rndv_xfer(rx_buf->ep, rx_buf->conn->msg_ep, rx_buf->remote_rndv_hdr,
+	ret = rxm_rndv_xfer(rx_buf->ep, rx_buf->conn, rx_buf->remote_rndv_hdr,
 			    rx_buf->recv_entry->rxm_iov.iov,
 			    rx_buf->recv_entry->rxm_iov.desc,
 			    rx_buf->recv_entry->rxm_iov.count, total_len,
@@ -553,7 +564,7 @@ static ssize_t rxm_rndv_handle_wr_data(struct rxm_rx_buf *rx_buf)
 
 	RXM_UPDATE_STATE(FI_LOG_CQ, tx_buf, RXM_RNDV_WRITE);
 
-	ret = rxm_rndv_xfer(rx_buf->ep, tx_buf->write_rndv.conn->msg_ep, rx_hdr,
+	ret = rxm_rndv_xfer(rx_buf->ep, tx_buf->write_rndv.conn, rx_hdr,
 			    tx_buf->write_rndv.iov, tx_buf->write_rndv.desc,
 			    tx_buf->count, total_len, tx_buf);
 
@@ -964,8 +975,12 @@ ssize_t rxm_rndv_send_wr_data(struct rxm_rx_buf *rx_buf)
 			  rx_buf->recv_entry->rxm_iov.iov,
 			  rx_buf->recv_entry->rxm_iov.count, rx_buf->mr);
 
-	ret = fi_send(rx_buf->conn->msg_ep, &buf->pkt, sizeof(buf->pkt) +
-		      sizeof(struct rxm_rndv_hdr), buf->hdr.desc, 0, rx_buf);
+	/* If duplex connectivity does not yet exist defer send until
+	 * connection back to peer completes */
+	ret = rxm_check_duplex_conn(&rx_buf->conn->handle);
+	if (!ret)
+		ret = fi_send(rx_buf->conn->msg_ep, &buf->pkt, sizeof(buf->pkt) +
+			      sizeof(struct rxm_rndv_hdr), buf->hdr.desc, 0, rx_buf);
 	if (ret) {
 		if (ret == -FI_EAGAIN) {
 			def_entry = rxm_ep_alloc_deferred_tx_entry(rx_buf->ep,
@@ -1048,6 +1063,10 @@ static ssize_t rxm_atomic_send_resp(struct rxm_ep *rxm_ep,
 	atomic_hdr->status = htonl(status);
 	atomic_hdr->result_len = htonl(result_len);
 
+	ret = rxm_check_duplex_conn(&rx_buf->conn->handle);
+	if (ret)
+		goto check_err;
+
 	if (resp_len < rxm_ep->inject_limit) {
 		ret = fi_inject(rx_buf->conn->msg_ep, &resp_buf->pkt,
 				resp_len, 0);
@@ -1057,6 +1076,8 @@ static ssize_t rxm_atomic_send_resp(struct rxm_ep *rxm_ep,
 		ret = rxm_atomic_send_respmsg(rxm_ep, rx_buf->conn, resp_buf,
 					      resp_len);
 	}
+
+check_err:
 	if (ret) {
 		FI_WARN(&rxm_prov, FI_LOG_CQ,
 			"Unable to send Atomic Response\n");
@@ -1867,7 +1888,7 @@ void rxm_ep_do_progress(struct util_ep *util_ep)
 				buf, repost_entry);
 
 		/* Discard rx buffer if its msg_ep was closed */
-		if (!rxm_ep->srx_ctx && !buf->conn->msg_ep) {
+		if (!rxm_ep->srx_ctx && !buf->conn->rx_msg_ep) {
 			ofi_buf_free(&buf->hdr);
 			continue;
 		}
