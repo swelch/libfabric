@@ -403,6 +403,17 @@ void ofi_straddr_log_internal(const char *func, int line,
 #define ofi_straddr_dbg(prov, subsystem, ...) do {} while(0)
 #endif
 
+/* A simplex connected protocol is defined as a FI_EP_MSG protocol
+ * where a connection establishes only TX data transfer from the
+ * connecting endpoint to a remote peer. */
+static inline bool ofi_is_simplex_protocol(const struct fi_ep_attr *ep_attr)
+{
+	if (ep_attr && ep_attr->protocol == FI_PROTO_RDMA_CM_IB_XRC &&
+	    ep_attr->protocol_version > 1)
+		return true;
+	else
+		return false;
+}
 
 #ifdef __cplusplus
 }
