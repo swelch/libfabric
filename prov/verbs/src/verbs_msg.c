@@ -342,34 +342,7 @@ static ssize_t vrb_msg_xrc_ep_injectdata(struct fid_ep *ep_fid, const void *buf,
 	return vrb_send_buf(&ep->base_ep, &wr, buf, len, NULL);
 }
 
-/* NOTE: Initially the XRC endpoint must be used with a SRQ. */
 const struct fi_ops_msg vrb_msg_xrc_ep_msg_ops_ts = {
-	.size = sizeof(struct fi_ops_msg),
-	.recv = fi_no_msg_recv,
-	.recvv = fi_no_msg_recvv,
-	.recvmsg = fi_no_msg_recvmsg,
-	.send = fi_no_msg_send,
-	.sendv = fi_no_msg_sendv,
-	.sendmsg = fi_no_msg_sendmsg,
-	.inject = fi_no_msg_inject,
-	.senddata = fi_no_msg_senddata,
-	.injectdata = fi_no_msg_injectdata,
-};
-
-const struct fi_ops_msg vrb_msg_xrc_ep_msg_ops = {
-	.size = sizeof(struct fi_ops_msg),
-	.recv = fi_no_msg_recv,
-	.recvv = fi_no_msg_recvv,
-	.recvmsg = fi_no_msg_recvmsg,
-	.send = fi_no_msg_send,
-	.sendv = fi_no_msg_sendv,
-	.sendmsg = fi_no_msg_sendmsg,
-	.inject = fi_no_msg_inject,
-	.senddata = fi_no_msg_senddata,
-	.injectdata = fi_no_msg_injectdata,
-};
-
-const struct fi_ops_msg vrb_msg_srq_xrc_ep_msg_ops = {
 	.size = sizeof(struct fi_ops_msg),
 	.recv = fi_no_msg_recv,
 	.recvv = fi_no_msg_recvv,
@@ -380,4 +353,31 @@ const struct fi_ops_msg vrb_msg_srq_xrc_ep_msg_ops = {
 	.inject = vrb_msg_xrc_ep_inject,
 	.senddata = vrb_msg_xrc_ep_senddata,
 	.injectdata = vrb_msg_xrc_ep_injectdata,
+};
+
+/* Note, non-thread safe XRC MSG ops are not yet accelerated */
+const struct fi_ops_msg vrb_msg_xrc_ep_msg_ops = {
+	.size = sizeof(struct fi_ops_msg),
+	.recv = fi_no_msg_recv,
+	.recvv = fi_no_msg_recvv,
+	.recvmsg = fi_no_msg_recvmsg,
+	.send = vrb_msg_xrc_ep_send,
+	.sendv = vrb_msg_xrc_ep_sendv,
+	.sendmsg = vrb_msg_xrc_ep_sendmsg,
+	.inject = vrb_msg_xrc_ep_inject,
+	.senddata = vrb_msg_xrc_ep_senddata,
+	.injectdata = vrb_msg_xrc_ep_injectdata,
+};
+
+const struct fi_ops_msg vrb_msg_srq_xrc_ep_msg_ops = {
+	.size = sizeof(struct fi_ops_msg),
+	.recv = fi_no_msg_recv,
+	.recvv = fi_no_msg_recvv,
+	.recvmsg = fi_no_msg_recvmsg,
+	.send = fi_no_msg_send,
+	.sendv = fi_no_msg_sendv,
+	.sendmsg = fi_no_msg_sendmsg,
+	.inject = fi_no_msg_inject,
+	.senddata = fi_no_msg_senddata,
+	.injectdata = fi_no_msg_injectdata,
 };

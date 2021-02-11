@@ -145,18 +145,21 @@ const struct verbs_ep_domain verbs_msg_domain = {
 	.suffix			= "",
 	.type			= FI_EP_MSG,
 	.protocol		= FI_PROTO_UNSPEC,
+	.protocol_version	= 1,
 };
 
 const struct verbs_ep_domain verbs_msg_xrc_domain = {
 	.suffix			= "-xrc",
 	.type			= FI_EP_MSG,
 	.protocol		= FI_PROTO_RDMA_CM_IB_XRC,
+	.protocol_version	= 2,
 };
 
 const struct verbs_ep_domain verbs_dgram_domain = {
 	.suffix			= "-dgram",
 	.type			= FI_EP_DGRAM,
 	.protocol		= FI_PROTO_UNSPEC,
+	.protocol_version	= 1,
 };
 
 /* The list (not thread safe) is populated once when the provider is initialized */
@@ -821,6 +824,7 @@ static int vrb_alloc_info(struct ibv_context *ctx, struct fi_info **info,
 			fi->ep_attr->protocol =
 				ep_dom->protocol == FI_PROTO_UNSPEC ?
 				FI_PROTO_RDMA_CM_IB_RC : ep_dom->protocol;
+			fi->ep_attr->protocol_version = ep_dom->protocol_version;
 			break;
 		case FI_EP_DGRAM:
 			fi->ep_attr->protocol = FI_PROTO_IB_UD;

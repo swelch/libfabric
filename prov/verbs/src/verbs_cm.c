@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013-2015 Intel Corporation, Inc.  All rights reserved.
+ * Copyright (c) 2018-2021 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -280,8 +281,7 @@ vrb_msg_xrc_ep_reject(struct vrb_connreq *connreq,
 	if (ret)
 		return ret;
 
-	vrb_set_xrc_cm_data(cm_data, connreq->xrc.is_reciprocal,
-			       connreq->xrc.conn_tag, connreq->xrc.port, 0, 0);
+	vrb_set_xrc_cm_data(cm_data, connreq->xrc.port, 0, 0);
 	ret = rdma_reject(connreq->id, cm_data,
 			  (uint8_t) paramlen) ? -errno : 0;
 	free(cm_data);
@@ -401,10 +401,9 @@ vrb_msg_xrc_ep_connect(struct fid_ep *ep, const void *addr,
 		free(cm_hdr);
 		return -FI_ENOMEM;
 	}
-	xrc_ep->conn_setup->conn_tag = VERBS_CONN_TAG_INVALID;
 
 	fastlock_acquire(&xrc_ep->base_ep.eq->lock);
-	ret = vrb_connect_xrc(xrc_ep, NULL, 0, adjusted_param, paramlen);
+	ret = vrb_connect_xrc(xrc_ep, NULL, adjusted_param, paramlen);
 	fastlock_release(&xrc_ep->base_ep.eq->lock);
 
 	free(adjusted_param);
@@ -436,7 +435,7 @@ vrb_msg_xrc_ep_accept(struct fid_ep *ep, const void *param, size_t paramlen)
 		return ret;
 
 	fastlock_acquire(&xrc_ep->base_ep.eq->lock);
-	ret = vrb_accept_xrc(xrc_ep, 0, adjusted_param, paramlen);
+	ret = vrb_accept_xrc(xrc_ep, adjusted_param, paramlen);
 	fastlock_release(&xrc_ep->base_ep.eq->lock);
 
 	free(adjusted_param);

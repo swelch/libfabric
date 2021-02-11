@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2018-2019 Cray Inc. All rights reserved.
- * Copyright (c) 2018-2019 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2018-2021 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -42,8 +42,8 @@ struct vrb_ini_conn_key {
 	struct vrb_cq	*tx_cq;
 };
 
-static int vrb_process_ini_conn(struct vrb_xrc_ep *ep,int reciprocal,
-				   void *param, size_t paramlen);
+static int vrb_process_ini_conn(struct vrb_xrc_ep *ep, void *param,
+				size_t paramlen);
 
 static int vrb_create_ini_qp(struct vrb_xrc_ep *ep)
 {
@@ -148,7 +148,6 @@ void _vrb_put_shared_ini_conn(struct vrb_xrc_ep *ep)
 
 	/* remove from pending or active connection list */
 	dlist_remove(&ep->ini_conn_entry);
-	ep->conn_state = VRB_XRC_UNCONNECTED;
 	ini_conn = ep->ini_conn;
 	ep->ini_conn = NULL;
 	ep->base_ep.ibv_qp = NULL;
@@ -191,28 +190,14 @@ void vrb_put_shared_ini_conn(struct vrb_xrc_ep *ep)
 }
 
 /* Caller must hold domain:xrc.ini_lock */
-void vrb_add_pending_ini_conn(struct vrb_xrc_ep *ep, int reciprocal,
-				 void *conn_param, size_t conn_paramlen)
+void vrb_add_pending_ini_conn(struct vrb_xrc_ep *ep, void *conn_param,
+			      size_t conn_paramlen)
 {
-	ep->conn_setup->pending_recip = reciprocal;
 	ep->conn_setup->pending_paramlen = MIN(conn_paramlen,
 				sizeof(ep->conn_setup->pending_param));
 	memcpy(ep->conn_setup->pending_param, conn_param,
 	       ep->conn_setup->pending_paramlen);
 	dlist_insert_tail(&ep->ini_conn_entry, &ep->ini_conn->pending_list);
-}
-
-/* Caller must hold domain:eq:lock */
-static void vrb_create_shutdown_event(struct vrb_xrc_ep *ep)
-{
-	struct fi_eq_cm_entry entry = {
-		.fid = &ep->base_ep.util_ep.ep_fid.fid,
-	};
-	struct vrb_eq_entry *eq_entry;
-
-	eq_entry = vrb_eq_alloc_entry(FI_SHUTDOWN, &entry, sizeof(entry));
-	if (eq_entry)
-		dlistfd_insert_tail(&eq_entry->item, &ep->base_ep.eq->list_head);
 }
 
 /* Caller must hold domain:xrc.ini_lock */
@@ -288,9 +273,8 @@ void vrb_sched_ini_conn(struct vrb_ini_shared_conn *ini_conn)
 				rdma_get_peer_addr(ep->base_ep.id));
 
 		ep->base_ep.ibv_qp = ep->ini_conn->ini_qp;
-		ret = vrb_process_ini_conn(ep, ep->conn_setup->pending_recip,
-					      ep->conn_setup->pending_param,
-					      ep->conn_setup->pending_paramlen);
+		ret = vrb_process_ini_conn(ep, ep->conn_setup->pending_param,
+					   ep->conn_setup->pending_paramlen);
 err:
 		if (ret) {
 			ep->ini_conn->state = last_state;
@@ -298,27 +282,24 @@ err:
 
 			/* We need to let the application know that the
 			 * connect request has failed. */
-			vrb_create_shutdown_event(ep);
+			if (vrb_create_xrc_cm_event(ep, FI_SHUTDOWN))
+				VERBS_WARN(FI_LOG_EP_CTRL, "Unable to create FI_SHUTDOWN\n");
 			break;
 		}
 	}
 }
 
 /* Caller must hold domain:xrc:eq:lock */
-int vrb_process_ini_conn(struct vrb_xrc_ep *ep,int reciprocal,
-			    void *param, size_t paramlen)
+int vrb_process_ini_conn(struct vrb_xrc_ep *ep, void *param,
+			 size_t paramlen)
 {
 	struct vrb_xrc_cm_data *cm_data = param;
 	int ret;
 
 	assert(ep->base_ep.ibv_qp);
 
-	vrb_set_xrc_cm_data(cm_data, reciprocal, reciprocal ?
-			       ep->conn_setup->remote_conn_tag :
-			       ep->conn_setup->conn_tag,
-			       ep->base_ep.eq->xrc.pep_port,
-			       ep->ini_conn->tgt_qpn, ep->srqn);
-
+	vrb_set_xrc_cm_data(cm_data, ep->base_ep.eq->xrc.pep_port,
+			    ep->ini_conn->tgt_qpn, 0);
 	ep->base_ep.conn_param.private_data = cm_data;
 	ep->base_ep.conn_param.private_data_len = paramlen;
 	ep->base_ep.conn_param.responder_resources = RDMA_MAX_RESP_RES;
@@ -332,17 +313,12 @@ int vrb_process_ini_conn(struct vrb_xrc_ep *ep,int reciprocal,
 		ep->base_ep.conn_param.qp_num =
 				ep->ini_conn->ini_qp->qp_num;
 
-	assert(ep->conn_state == VRB_XRC_UNCONNECTED ||
-	       ep->conn_state == VRB_XRC_ORIG_CONNECTED);
-	vrb_next_xrc_conn_state(ep);
-
 	ret = rdma_resolve_route(ep->base_ep.id, VERBS_RESOLVE_TIMEOUT);
 	if (ret) {
 		ret = -errno;
 		VERBS_WARN(FI_LOG_EP_CTRL,
 			   "rdma_resolve_route failed %s (%d)\n",
 			   strerror(-ret), -ret);
-		vrb_prev_xrc_conn_state(ep);
 	}
 
 	return ret;
@@ -356,7 +332,7 @@ int vrb_ep_create_tgt_qp(struct vrb_xrc_ep *ep, uint32_t tgt_qpn)
 	struct vrb_domain *domain = vrb_ep_to_domain(&ep->base_ep);
 	int ret;
 
-	assert(ep->tgt_id && !ep->tgt_id->qp);
+	assert(ep->base_ep.id && !ep->base_ep.id->qp);
 
 	/* If a target QP number was specified then open that existing
 	 * QP for sharing. */
@@ -370,8 +346,8 @@ int vrb_ep_create_tgt_qp(struct vrb_xrc_ep *ep, uint32_t tgt_qpn)
 		open_attr.qp_type = IBV_QPT_XRC_RECV;
 		open_attr.qp_context = ep;
 
-		ep->tgt_ibv_qp = ibv_open_qp(domain->verbs, &open_attr);
-		if (!ep->tgt_ibv_qp) {
+		ep->base_ep.ibv_qp = ibv_open_qp(domain->verbs, &open_attr);
+		if (!ep->base_ep.ibv_qp) {
 			ret = -errno;
 			VERBS_WARN(FI_LOG_EP_CTRL,
 				   "XRC TGT QP ibv_open_qp failed %d\n", -ret);
@@ -389,14 +365,14 @@ int vrb_ep_create_tgt_qp(struct vrb_xrc_ep *ep, uint32_t tgt_qpn)
 	attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_XRCD;
 	attr_ex.pd = domain->pd;
 	attr_ex.xrcd = domain->xrc.xrcd;
-	if (rdma_create_qp_ex(ep->tgt_id, &attr_ex)) {
+	if (rdma_create_qp_ex(ep->base_ep.id, &attr_ex)) {
 		ret = -errno;
 		VERBS_WARN(FI_LOG_EP_CTRL,
 			   "Physical XRC TGT QP rdma_create_qp_ex failed %d\n",
 			   -ret);
 		return ret;
 	}
-	ep->tgt_ibv_qp = ep->tgt_id->qp;
+	ep->base_ep.ibv_qp = ep->base_ep.id->qp;
 
 	return FI_SUCCESS;
 #else /* VERBS_HAVE_XRC */
@@ -408,12 +384,14 @@ static int vrb_put_tgt_qp(struct vrb_xrc_ep *ep)
 {
 	int ret;
 
-	if (!ep->tgt_ibv_qp)
+	if (!ep->base_ep.ibv_qp)
 		return FI_SUCCESS;
+
+	assert(ep->base_ep.ibv_qp->qp_type == IBV_QPT_XRC_RECV);
 
 	/* The kernel will not destroy the detached TGT QP until all
 	 * shared opens have called ibv_destroy_qp. */
-	ret = ibv_destroy_qp(ep->tgt_ibv_qp);
+	ret = ibv_destroy_qp(ep->base_ep.ibv_qp);
 	if (ret) {
 		ret = -errno;
 		VERBS_WARN(FI_LOG_EP_CTRL,
@@ -421,9 +399,9 @@ static int vrb_put_tgt_qp(struct vrb_xrc_ep *ep)
 			   -ret);
 		return ret;
 	}
-	ep->tgt_ibv_qp = NULL;
-	if (ep->tgt_id)
-		ep->tgt_id->qp = NULL;
+	ep->base_ep.ibv_qp = NULL;
+	if (ep->base_ep.id)
+		ep->base_ep.id->qp = NULL;
 
 	return FI_SUCCESS;
 }
@@ -431,18 +409,16 @@ static int vrb_put_tgt_qp(struct vrb_xrc_ep *ep)
 /* Caller must hold eq:lock */
 int vrb_ep_destroy_xrc_qp(struct vrb_xrc_ep *ep)
 {
-	vrb_put_shared_ini_conn(ep);
+	if (ep->base_ep.ibv_qp) {
+		if (ep->base_ep.ibv_qp->qp_type == IBV_QPT_XRC_SEND)
+			vrb_put_shared_ini_conn(ep);
+		else
+			vrb_put_tgt_qp(ep);
+	}
 
 	if (ep->base_ep.id) {
 		rdma_destroy_id(ep->base_ep.id);
 		ep->base_ep.id = NULL;
-	}
-	if (ep->tgt_ibv_qp)
-		vrb_put_tgt_qp(ep);
-
-	if (ep->tgt_id) {
-		rdma_destroy_id(ep->tgt_id);
-		ep->tgt_id = NULL;
 	}
 	return 0;
 }

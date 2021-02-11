@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2013-2018 Intel Corporation, Inc.  All rights reserved.
- * Copyright (c) 2019 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2019-2021 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -438,9 +438,7 @@ static inline void vrb_ep_xrc_close(struct vrb_ep *ep)
 	struct vrb_xrc_ep *xrc_ep = container_of(ep, struct vrb_xrc_ep,
 						    base_ep);
 
-	if (xrc_ep->conn_setup)
-		vrb_free_xrc_conn_setup(xrc_ep, 0);
-
+	vrb_free_xrc_conn_setup(xrc_ep, 0);
 	if (xrc_ep->conn_map_node)
 		vrb_eq_remove_sidr_conn(xrc_ep);
 	vrb_ep_destroy_xrc_qp(xrc_ep);
@@ -510,16 +508,6 @@ static int vrb_ep_close(fid_t fid)
 	return 0;
 }
 
-static inline int vrb_ep_xrc_set_tgt_chan(struct vrb_ep *ep)
-{
-	struct vrb_xrc_ep *xrc_ep = container_of(ep, struct vrb_xrc_ep,
-						    base_ep);
-	if (xrc_ep->tgt_id)
-		return rdma_migrate_id(xrc_ep->tgt_id, ep->eq->channel);
-
-	return FI_SUCCESS;
-}
-
 static int vrb_ep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 {
 	struct vrb_ep *ep;
@@ -560,22 +548,24 @@ static int vrb_ep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 			return -FI_EINVAL;
 
 		ep->eq = container_of(bfid, struct vrb_eq, eq_fid.fid);
-
-		/* Make sure EQ channel is not polled during migrate */
-		fastlock_acquire(&ep->eq->lock);
-		if (vrb_is_xrc_ep(ep))
-			ret = vrb_ep_xrc_set_tgt_chan(ep);
-		else
+		if (ep->id) {
+			/* Make sure EQ channel is not polled during migrate */
+			fastlock_acquire(&ep->eq->lock);
 			ret = rdma_migrate_id(ep->id, ep->eq->channel);
-		fastlock_release(&ep->eq->lock);
-		if (ret)
-			return -errno;
-
+			fastlock_release(&ep->eq->lock);
+			if (ret)
+				return -errno;
+		}
 		break;
 	case FI_CLASS_SRX_CTX:
 		if (ep->util_ep.type != FI_EP_MSG)
 			return -FI_EINVAL;
 
+		if (ep->info_attr.tx_size && !ep->info_attr.rx_size) {
+			VERBS_WARN(FI_LOG_EP_CTRL,
+				   "Binding XRC TX EP to SRX context\n");
+			return -FI_EINVAL;
+		}
 		ep->srq_ep = container_of(bfid, struct vrb_srq_ep, ep_fid.fid);
 		break;
 	case FI_CLASS_AV:
@@ -727,7 +717,14 @@ static int vrb_ep_enable_xrc(struct vrb_ep *ep)
 
 	/* XRC EP additional initialization */
 	dlist_init(&xrc_ep->ini_conn_entry);
-	xrc_ep->conn_state = VRB_XRC_UNCONNECTED;
+
+	if (ep->info_attr.tx_size && !ep->info_attr.rx_size) {
+		if (srq_ep)
+			VERBS_WARN(FI_LOG_EP_CTRL, "XRC TX EP should not "
+				   "be bound to SRX context\n");
+		return FI_SUCCESS;
+	}
+	assert(srq_ep);
 
 	fastlock_acquire(&srq_ep->xrc.prepost_lock);
 	if (srq_ep->srq) {
@@ -884,9 +881,12 @@ static int vrb_ep_enable(struct fid_ep *ep_fid)
 				ep->util_ep.ep_fid.msg->recvmsg = fi_no_msg_recvmsg;
 			}
 		} else if (domain->flags & VRB_USE_XRC) {
-			VERBS_WARN(FI_LOG_EP_CTRL, "XRC EP_MSG not bound "
-				   "to srx_context\n");
-			return -FI_EINVAL;
+			if (ep->info_attr.rx_size) {
+				VERBS_WARN(FI_LOG_EP_CTRL, "XRC RX EP not bound "
+					   "to SRX context\n");
+				return -FI_EINVAL;
+			}
+			return FI_SUCCESS;
 		}
 
 		ret = rdma_create_qp(ep->id, domain->pd, &attr);
@@ -1019,13 +1019,20 @@ static int vrb_ep_save_info_attr(struct vrb_ep *ep, struct fi_info *info)
 {
 	ep->info_attr.protocol = info->ep_attr ? info->ep_attr->protocol:
 	    FI_PROTO_UNSPEC;
-	ep->info_attr.inject_size = info->tx_attr->inject_size;
-	ep->info_attr.tx_size = info->tx_attr->size;
-	ep->info_attr.tx_iov_limit = info->tx_attr->iov_limit;
-	ep->info_attr.rx_size = info->rx_attr->size;
-	ep->info_attr.rx_iov_limit = info->rx_attr->iov_limit;
+
+	/* Duplex EP or a simplex TX EP */
+	if (!ofi_is_simplex_protocol(info->ep_attr) || !info->handle) {
+		ep->info_attr.inject_size = info->tx_attr->inject_size;
+		ep->info_attr.tx_size = info->tx_attr->size;
+		ep->info_attr.tx_iov_limit = info->tx_attr->iov_limit;
+	}
+	/* Duplex EP or a simplex RX EP */
+	if (!ofi_is_simplex_protocol(info->ep_attr) || info->handle) {
+		ep->info_attr.rx_size = info->rx_attr->size;
+		ep->info_attr.rx_iov_limit = info->rx_attr->iov_limit;
+		ep->info_attr.handle = info->handle;
+	}
 	ep->info_attr.addr_format = info->addr_format;
-	ep->info_attr.handle = info->handle;
 
 	if (info->src_addr) {
 		ep->info_attr.src_addr = mem_dup(info->src_addr, info->src_addrlen);
@@ -1149,20 +1156,11 @@ int vrb_open_ep(struct fid_domain *domain, struct fi_info *info,
 		} else if (info->handle->fclass == FI_CLASS_CONNREQ) {
 			connreq = container_of(info->handle,
 					       struct vrb_connreq, handle);
-			if (dom->flags & VRB_USE_XRC) {
-				assert(connreq->is_xrc);
-
-				if (!connreq->xrc.is_reciprocal) {
-					ret = vrb_process_xrc_connreq(ep,
-								connreq);
-					if (ret)
-						goto err1;
-				}
-			} else {
-				ep->id = connreq->id;
+			ep->id = connreq->id;
+			/* RDMA CM does not control QP for XRC, set later */
+			if (!(dom->flags & VRB_USE_XRC))
 				ep->ibv_qp = ep->id->qp;
-				ep->id->context = &ep->util_ep.ep_fid.fid;
-			}
+			ep->id->context = &ep->util_ep.ep_fid.fid;
 		} else if (info->handle->fclass == FI_CLASS_PEP) {
 			pep = container_of(info->handle, struct vrb_pep, pep_fid.fid);
 			ep->id = pep->id;
@@ -1240,9 +1238,8 @@ static int vrb_pep_bind(fid_t fid, struct fid *bfid, uint64_t flags)
 	/*
 	 * This is a restrictive solution that enables an XRC EP to
 	 * inform it's peer the port that should be used in making the
-	 * reciprocal connection request. While it meets RXM requirements
-	 * it limits an EQ to a single passive endpoint. TODO: implement
-	 * a more general solution.
+	 * a reverse connection request. While it meets RXM requirements
+	 * it limits an EQ to a single passive endpoint.
 	 */
 	if (vrb_is_xrc_info(pep->info)) {
 		if (pep->eq->xrc.pep_port) {
