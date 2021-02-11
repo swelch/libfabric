@@ -1224,6 +1224,17 @@ rxm_msg_process_connreq(struct rxm_ep *rxm_ep, struct fi_info *msg_info,
 	cm_data.accept.server_conn_id = rxm_conn->handle.key;
 	cm_data.accept.rx_size = rxm_conn_get_rx_size(rxm_ep, msg_info);
 
+	/* Allow applications to indicate they always want to establish
+	 * duplex connectivity up front instead of on demand */
+	if (rxm_force_duplex) {
+		ret = rxm_check_duplex_conn(handle);
+		if (ret && ret != -FI_EAGAIN) {
+			FI_WARN(&rxm_prov, FI_LOG_EP_CTRL,
+				"Simplex reverse connect failed\n");
+			goto err2;
+		}
+	}
+
 	ret = fi_accept(simplex ? rxm_conn->rx_msg_ep : rxm_conn->msg_ep,
 			&cm_data.accept.server_conn_id, sizeof(cm_data.accept));
 	if (ret) {

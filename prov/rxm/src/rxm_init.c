@@ -55,6 +55,7 @@ size_t rxm_buffer_size		= 16384 + sizeof(struct rxm_pkt);
 
 int force_auto_progress		= 0;
 int rxm_use_write_rndv		= 0;
+int rxm_force_duplex		= 0;
 enum fi_wait_obj def_wait_obj = FI_WAIT_FD, def_tcp_wait_obj = FI_WAIT_UNSPEC;
 
 char *rxm_proto_state_str[] = {
@@ -544,6 +545,12 @@ RXM_INI
 			"feature targets small to medium size message "
 			"transfers over the tcp provider.  (default: false)");
 
+	fi_param_define(&rxm_prov, "force_duplex", FI_PARAM_BOOL,
+			"Enable forcing duplex transfer connectivity when "
+			"a simplex transport connection is accepted. This "
+			"allows an application that knows it requires duplex "
+			"connectivity to establish the connectivity before "
+			"(default: false)");
 	rxm_init_infos();
 	fi_param_get_size_t(&rxm_prov, "msg_tx_size", &rxm_msg_tx_size);
 	fi_param_get_size_t(&rxm_prov, "msg_rx_size", &rxm_msg_rx_size);
@@ -553,6 +560,8 @@ RXM_INI
 	if (fi_param_get_int(&rxm_prov, "cq_eq_fairness",
 				(int *) &rxm_cq_eq_fairness))
 		rxm_cq_eq_fairness = 128;
+
+	fi_param_get_bool(&rxm_prov, "force_duplex", &rxm_force_duplex);
 	fi_param_get_bool(&rxm_prov, "data_auto_progress", &force_auto_progress);
 	fi_param_get_bool(&rxm_prov, "use_rndv_write", &rxm_use_write_rndv);
 

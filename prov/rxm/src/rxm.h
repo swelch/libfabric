@@ -131,6 +131,7 @@ extern size_t rxm_cm_progress_interval;
 extern size_t rxm_cq_eq_fairness;
 extern int force_auto_progress;
 extern int rxm_use_write_rndv;
+extern int rxm_force_duplex;
 extern enum fi_wait_obj def_wait_obj, def_tcp_wait_obj;
 
 struct rxm_ep;
@@ -748,7 +749,6 @@ struct rxm_ep {
 	size_t 			comp_per_progress;
 	ofi_atomic32_t		atomic_tx_credits;
 	int			cq_eq_fairness;
-
 	bool			msg_mr_local;
 	bool			rdm_mr_local;
 	bool			do_progress;
